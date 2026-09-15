@@ -2129,6 +2129,95 @@ function ResourcesHub() {
   );
 }
 
+function QuickNotes() {
+  const [notes, setNotes] = useState(() => {
+    try {
+      return JSON.parse(localStorage.getItem("campusosNotes")) || [];
+    } catch {
+      return [];
+    }
+  });
+  const [title, setTitle] = useState("");
+  const [body, setBody] = useState("");
+  const [search, setSearch] = useState("");
+
+  const saveNotes = (items) => {
+    setNotes(items);
+    localStorage.setItem("campusosNotes", JSON.stringify(items));
+  };
+
+  const addNote = (event) => {
+    event.preventDefault();
+    if (!body.trim()) return;
+    saveNotes([
+      { id: Date.now(), title: title.trim() || "Quick Note", body: body.trim(), pinned: false },
+      ...notes,
+    ]);
+    setTitle("");
+    setBody("");
+  };
+
+  const togglePin = (id) => {
+    saveNotes(notes.map((note) => note.id === id ? { ...note, pinned: !note.pinned } : note));
+  };
+
+  const filtered = notes
+    .filter((note) => `${note.title} ${note.body}`.toLowerCase().includes(search.toLowerCase()))
+    .sort((a, b) => Number(b.pinned) - Number(a.pinned));
+
+  return (
+    <div className="page-container">
+      <div className="page-header">
+        <div>
+          <h1>Quick Notes</h1>
+          <p>Capture ideas, reminders and study points without leaving CampusOS.</p>
+        </div>
+      </div>
+
+      <section className="notes-layout">
+        <div className="panel note-editor-panel">
+          <div className="panel-header">
+            <div><h2>New Note</h2><p className="panel-subtitle">Write something you don't want to forget.</p></div>
+            <span className="feature-icon">📝</span>
+          </div>
+          <form className="note-form" onSubmit={addNote}>
+            <input value={title} onChange={(event) => setTitle(event.target.value)} placeholder="Note title" />
+            <textarea value={body} onChange={(event) => setBody(event.target.value)} placeholder="Start typing..." rows="9" required />
+            <button className="submit-button" type="submit">Save Note</button>
+          </form>
+        </div>
+
+        <div className="panel notes-list-panel">
+          <div className="panel-header">
+            <div><h2>My Notes</h2><p className="panel-subtitle">{notes.length} note{notes.length !== 1 ? "s" : ""}</p></div>
+            <input className="resource-search" value={search} onChange={(event) => setSearch(event.target.value)} placeholder="Search notes..." />
+          </div>
+          {filtered.length === 0 ? (
+            <div className="empty-feature-state"><span>📝</span><p>Your saved notes will appear here.</p></div>
+          ) : (
+            <div className="note-grid">
+              {filtered.map((note) => (
+                <article className={`note-card ${note.pinned ? "pinned" : ""}`} key={note.id}>
+                  <div className="note-card-top">
+                    <h3>{note.title}</h3>
+                    <button className="pin-button" onClick={() => togglePin(note.id)}>{note.pinned ? "📌" : "📍"}</button>
+                  </div>
+                  <p>{note.body}</p>
+                  <div className="note-card-footer">
+                    <small>{new Date(note.id).toLocaleDateString("en-US", { day: "2-digit", month: "short" })}</small>
+                    <button className="text-delete-button" onClick={() => saveNotes(notes.filter((item) => item.id !== note.id))}>Delete</button>
+                  </div>
+                </article>
+              ))}
+            </div>
+          )}
+        </div>
+      </section>
+    </div>
+  );
+}
+
+
 function AttendanceTracker() {
   const [subjects, setSubjects] = useState(() => {
     try {
@@ -2679,7 +2768,7 @@ function AppContent() {
 
   const loadTasks = () => {
     fetch(
-      "http://localhost:5000/api/tasks"
+      "https://campusos-rios.onrender.com/api/tasks"
     )
       .then((response) => {
         if (!response.ok) {
@@ -2720,8 +2809,8 @@ function AppContent() {
 
     try {
       const url = editingTask
-        ? `http://localhost:5000/api/tasks/${editingTask.id}`
-        : "http://localhost:5000/api/tasks";
+        ? `https://campusos-rios.onrender.com/api/tasks/${editingTask.id}`
+        : "https://campusos-rios.onrender.com/api/tasks";
 
       const method = editingTask
         ? "PUT"
@@ -2801,7 +2890,7 @@ function AppContent() {
 
     try {
       const response = await fetch(
-        `http://localhost:5000/api/tasks/${task.id}`,
+        `https://campusos-rios.onrender.com/api/tasks/${task.id}`,
         {
           method: "DELETE",
         }
@@ -2831,7 +2920,7 @@ function AppContent() {
 
     try {
       const response = await fetch(
-        `http://localhost:5000/api/tasks/${task.id}/completed`,
+        `https://campusos-rios.onrender.com/api/tasks/${task.id}/completed`,
         {
           method: "PATCH",
           headers: {
@@ -2921,6 +3010,10 @@ function AppContent() {
     {
       name: "Resources",
       path: "/resources",
+    },
+    {
+      name: "Quick Notes",
+      path: "/notes",
     },
   ];
 
@@ -3068,6 +3161,11 @@ function AppContent() {
           <Route
             path="/resources"
             element={<ResourcesHub />}
+          />
+
+          <Route
+            path="/notes"
+            element={<QuickNotes />}
           />
 
         </Routes>
