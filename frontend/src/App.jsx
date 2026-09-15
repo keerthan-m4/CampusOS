@@ -7,6 +7,34 @@ import {
   useLocation,
 } from "react-router-dom";
 
+const API_BASE_URL = "https://campusos-rios.onrender.com";
+
+function getSavedAuth() {
+  try {
+    const saved = localStorage.getItem("campusosAuth");
+    if (!saved) return null;
+
+    const parsed = JSON.parse(saved);
+
+    if (
+      !parsed ||
+      typeof parsed.token !== "string" ||
+      !parsed.user
+    ) {
+      return null;
+    }
+
+    return parsed;
+  } catch (error) {
+    console.error("Failed to restore login session:", error);
+    return null;
+  }
+}
+
+function saveAuthSession(auth) {
+  localStorage.setItem("campusosAuth", JSON.stringify(auth));
+}
+
 function formatDate(dateString) {
   if (!dateString) {
     return {
@@ -2744,7 +2772,190 @@ function CollegeTimetable() {
   </div>;
 }
 
-function AppContent() {
+
+function AuthPage({ onAuthenticated }) {
+  const [mode, setMode] = useState("login");
+  const [name, setName] = useState("");
+  const [email, setEmail] = useState("");
+  const [password, setPassword] = useState("");
+  const [loading, setLoading] = useState(false);
+  const [errorMessage, setErrorMessage] = useState("");
+
+  const handleSubmit = async (event) => {
+    event.preventDefault();
+    setErrorMessage("");
+
+    const cleanEmail = email.trim().toLowerCase();
+
+    if (mode === "signup" && !name.trim()) {
+      setErrorMessage("Please enter your name.");
+      return;
+    }
+
+    if (!cleanEmail || !password) {
+      setErrorMessage("Please enter your email and password.");
+      return;
+    }
+
+    if (password.length < 6) {
+      setErrorMessage("Password must be at least 6 characters.");
+      return;
+    }
+
+    setLoading(true);
+
+    try {
+      const response = await fetch(
+        `${API_BASE_URL}/api/auth/${mode === "login" ? "login" : "signup"}`,
+        {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify(
+            mode === "login"
+              ? {
+                  email: cleanEmail,
+                  password,
+                }
+              : {
+                  name: name.trim(),
+                  email: cleanEmail,
+                  password,
+                }
+          ),
+        }
+      );
+
+      const data = await response.json();
+
+      if (!response.ok) {
+        throw new Error(data.error || "Authentication failed.");
+      }
+
+      const auth = {
+        token: data.token,
+        user: data.user,
+      };
+
+      saveAuthSession(auth);
+      onAuthenticated(auth);
+    } catch (error) {
+      console.error("Authentication failed:", error);
+      setErrorMessage(error.message || "Could not connect to CampusOS.");
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  return (
+    <div className="auth-page">
+      <div className="auth-card">
+        <div className="auth-brand">
+          <div className="auth-logo">C</div>
+          <div>
+            <h1>CampusOS</h1>
+            <p>Your personal campus operating system</p>
+          </div>
+        </div>
+
+        <div className="auth-tabs">
+          <button
+            type="button"
+            className={mode === "login" ? "active" : ""}
+            onClick={() => {
+              setMode("login");
+              setErrorMessage("");
+            }}
+          >
+            Login
+          </button>
+          <button
+            type="button"
+            className={mode === "signup" ? "active" : ""}
+            onClick={() => {
+              setMode("signup");
+              setErrorMessage("");
+            }}
+          >
+            Create Account
+          </button>
+        </div>
+
+        <div className="auth-heading">
+          <h2>{mode === "login" ? "Welcome back" : "Create your CampusOS account"}</h2>
+          <p>
+            {mode === "login"
+              ? "Log in to continue to your dashboard."
+              : "Create an account to keep your CampusOS data private to you."}
+          </p>
+        </div>
+
+        <form className="auth-form" onSubmit={handleSubmit}>
+          {mode === "signup" && (
+            <>
+              <label htmlFor="auth-name">Full name</label>
+              <input
+                id="auth-name"
+                type="text"
+                placeholder="Enter your name"
+                value={name}
+                onChange={(event) => setName(event.target.value)}
+                autoComplete="name"
+                required
+              />
+            </>
+          )}
+
+          <label htmlFor="auth-email">Email</label>
+          <input
+            id="auth-email"
+            type="email"
+            placeholder="you@example.com"
+            value={email}
+            onChange={(event) => setEmail(event.target.value)}
+            autoComplete="email"
+            required
+          />
+
+          <label htmlFor="auth-password">Password</label>
+          <input
+            id="auth-password"
+            type="password"
+            placeholder="At least 6 characters"
+            value={password}
+            onChange={(event) => setPassword(event.target.value)}
+            autoComplete={mode === "login" ? "current-password" : "new-password"}
+            minLength={6}
+            required
+          />
+
+          {errorMessage && (
+            <div className="auth-error">
+              {errorMessage}
+            </div>
+          )}
+
+          <button className="auth-submit" type="submit" disabled={loading}>
+            {loading
+              ? "Please wait..."
+              : mode === "login"
+              ? "Login to CampusOS"
+              : "Create CampusOS Account"}
+          </button>
+        </form>
+
+        <p className="auth-footer">
+          {mode === "login"
+            ? "New to CampusOS? Use Create Account above."
+            : "Already have an account? Switch to Login above."}
+        </p>
+      </div>
+    </div>
+  );
+}
+
+function AppContent({ user, token, onLogout }) {
   const [tasks, setTasks] =
     useState([]);
 
@@ -2766,9 +2977,26 @@ function AppContent() {
   const location =
     useLocation();
 
+  const authFetch = async (url, options = {}) => {
+    const response = await fetch(url, {
+      ...options,
+      headers: {
+        ...(options.headers || {}),
+        Authorization: `Bearer ${token}`,
+      },
+    });
+
+    if (response.status === 401) {
+      onLogout();
+      throw new Error("Your session has expired. Please log in again.");
+    }
+
+    return response;
+  };
+
   const loadTasks = () => {
-    fetch(
-      "https://campusos-rios.onrender.com/api/tasks"
+    authFetch(
+      `${API_BASE_URL}/api/tasks`
     )
       .then((response) => {
         if (!response.ok) {
@@ -2809,14 +3037,14 @@ function AppContent() {
 
     try {
       const url = editingTask
-        ? `https://campusos-rios.onrender.com/api/tasks/${editingTask.id}`
-        : "https://campusos-rios.onrender.com/api/tasks";
+        ? `${API_BASE_URL}/api/tasks/${editingTask.id}`
+        : `${API_BASE_URL}/api/tasks`;
 
       const method = editingTask
         ? "PUT"
         : "POST";
 
-      const response = await fetch(
+      const response = await authFetch(
         url,
         {
           method,
@@ -2889,8 +3117,8 @@ function AppContent() {
     }
 
     try {
-      const response = await fetch(
-        `https://campusos-rios.onrender.com/api/tasks/${task.id}`,
+      const response = await authFetch(
+        `${API_BASE_URL}/api/tasks/${task.id}`,
         {
           method: "DELETE",
         }
@@ -2919,8 +3147,8 @@ function AppContent() {
       !task.completed;
 
     try {
-      const response = await fetch(
-        `https://campusos-rios.onrender.com/api/tasks/${task.id}/completed`,
+      const response = await authFetch(
+        `${API_BASE_URL}/api/tasks/${task.id}/completed`,
         {
           method: "PATCH",
           headers: {
@@ -3011,10 +3239,6 @@ function AppContent() {
       name: "Resources",
       path: "/resources",
     },
-    {
-      name: "Quick Notes",
-      path: "/notes",
-    },
   ];
 
   return (
@@ -3046,14 +3270,22 @@ function AppContent() {
 
           <div>
             <strong>
-              Student
+              {user.name}
             </strong>
 
             <small>
-              CampusOS User
+              {user.email}
             </small>
           </div>
         </div>
+
+        <button
+          className="logout-button"
+          type="button"
+          onClick={onLogout}
+        >
+          Log out
+        </button>
       </aside>
 
       <main className="main">
@@ -3161,11 +3393,6 @@ function AppContent() {
           <Route
             path="/resources"
             element={<ResourcesHub />}
-          />
-
-          <Route
-            path="/notes"
-            element={<QuickNotes />}
           />
 
         </Routes>
@@ -3314,9 +3541,29 @@ function AppContent() {
 }
 
 function App() {
+  const [auth, setAuth] = useState(getSavedAuth);
+
+  const handleAuthenticated = (nextAuth) => {
+    saveAuthSession(nextAuth);
+    setAuth(nextAuth);
+  };
+
+  const handleLogout = () => {
+    localStorage.removeItem("campusosAuth");
+    setAuth(null);
+  };
+
+  if (!auth) {
+    return <AuthPage onAuthenticated={handleAuthenticated} />;
+  }
+
   return (
     <BrowserRouter>
-      <AppContent />
+      <AppContent
+        user={auth.user}
+        token={auth.token}
+        onLogout={handleLogout}
+      />
     </BrowserRouter>
   );
 }
