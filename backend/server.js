@@ -8,7 +8,7 @@ const pool = require("./db");
 const app = express();
 
 app.use(cors());
-app.use(express.json());
+app.use(express.json({ limit: "8mb" }));
 
 const SESSION_DAYS = 30;
 
@@ -40,10 +40,7 @@ async function verifyPassword(password, storedValue) {
     const a = Buffer.from(storedHash, "hex");
     const b = Buffer.from(derivedHash, "hex");
 
-    return (
-      a.length === b.length &&
-      crypto.timingSafeEqual(a, b)
-    );
+    return a.length === b.length && crypto.timingSafeEqual(a, b);
   } catch {
     return false;
   }
@@ -109,6 +106,81 @@ async function ensureDatabase() {
   `);
 
   await pool.query(`
+    CREATE TABLE IF NOT EXISTS attendance (
+      id SERIAL PRIMARY KEY,
+      user_id INTEGER NOT NULL
+        REFERENCES users(id)
+        ON DELETE CASCADE,
+      subject VARCHAR(255) NOT NULL,
+      last_working_day DATE NOT NULL,
+      classes_per_week INTEGER NOT NULL,
+      target NUMERIC(5,2) NOT NULL,
+      attended INTEGER NOT NULL,
+      total INTEGER NOT NULL,
+      created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    );
+  `);
+
+  await pool.query(`
+    CREATE INDEX IF NOT EXISTS idx_attendance_user_id
+    ON attendance(user_id);
+  `);
+
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS cgpa_data (
+      user_id INTEGER PRIMARY KEY
+        REFERENCES users(id)
+        ON DELETE CASCADE,
+      semesters JSONB NOT NULL DEFAULT '[]'::jsonb,
+      current_subjects JSONB NOT NULL DEFAULT '[]'::jsonb,
+      semester_name VARCHAR(255) NOT NULL DEFAULT 'Semester 1',
+      updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    );
+  `);
+
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS timetable (
+      id SERIAL PRIMARY KEY,
+      user_id INTEGER NOT NULL
+        REFERENCES users(id)
+        ON DELETE CASCADE,
+      day VARCHAR(20) NOT NULL,
+      time VARCHAR(10) NOT NULL,
+      subject VARCHAR(255) NOT NULL,
+      room VARCHAR(255),
+      faculty VARCHAR(255),
+      created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    );
+  `);
+
+  await pool.query(`
+    CREATE INDEX IF NOT EXISTS idx_timetable_user_id
+    ON timetable(user_id);
+  `);
+
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS resources (
+      id SERIAL PRIMARY KEY,
+      user_id INTEGER NOT NULL
+        REFERENCES users(id)
+        ON DELETE CASCADE,
+      subject VARCHAR(255) NOT NULL,
+      title VARCHAR(255) NOT NULL,
+      type VARCHAR(20) NOT NULL,
+      url TEXT,
+      file_name TEXT,
+      file_data TEXT,
+      mime_type VARCHAR(255),
+      created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    );
+  `);
+
+  await pool.query(`
+    CREATE INDEX IF NOT EXISTS idx_resources_user_id
+    ON resources(user_id);
+  `);
+
+  await pool.query(`
     DELETE FROM sessions
     WHERE expires_at <= CURRENT_TIMESTAMP;
   `);
@@ -119,8 +191,7 @@ async function createSession(userId) {
   const tokenHash = hashSessionToken(token);
 
   const expiresAt = new Date(
-    Date.now() +
-      SESSION_DAYS * 24 * 60 * 60 * 1000
+    Date.now() + SESSION_DAYS * 24 * 60 * 60 * 1000
   );
 
   await pool.query(
@@ -156,8 +227,7 @@ async function requireAuth(req, res, next) {
         u.name,
         u.email
       FROM sessions s
-      JOIN users u
-        ON u.id = s.user_id
+      JOIN users u ON u.id = s.user_id
       WHERE s.token_hash = $1
         AND s.expires_at > CURRENT_TIMESTAMP
       `,
@@ -191,10 +261,7 @@ app.get("/", (req, res) => {
   });
 });
 
-/* =========================
-   AUTH - SIGN UP
-========================= */
-
+// AUTH - SIGN UP
 app.post("/api/auth/signup", async (req, res) => {
   const client = await pool.connect();
 
@@ -269,10 +336,6 @@ app.post("/api/auth/signup", async (req, res) => {
       "SELECT COUNT(*) FROM users"
     );
 
-    /*
-      Preserve existing tasks when the first
-      account is created.
-    */
     if (Number(userCount.rows[0].count) === 1) {
       await client.query(
         `
@@ -331,10 +394,7 @@ app.post("/api/auth/signup", async (req, res) => {
   }
 });
 
-/* =========================
-   AUTH - LOGIN
-========================= */
-
+// AUTH - LOGIN
 app.post("/api/auth/login", async (req, res) => {
   try {
     const email = String(
@@ -399,10 +459,7 @@ app.post("/api/auth/login", async (req, res) => {
   }
 });
 
-/* =========================
-   AUTH - CURRENT USER
-========================= */
-
+// AUTH - CURRENT USER
 app.get(
   "/api/auth/me",
   requireAuth,
@@ -413,10 +470,7 @@ app.get(
   }
 );
 
-/* =========================
-   AUTH - LOGOUT
-========================= */
-
+// AUTH - LOGOUT
 app.post(
   "/api/auth/logout",
   requireAuth,
@@ -453,10 +507,7 @@ app.post(
   }
 );
 
-/* =========================
-   TASKS - GET
-========================= */
-
+// GET ALL TASKS
 app.get(
   "/api/tasks",
   requireAuth,
@@ -493,10 +544,7 @@ app.get(
   }
 );
 
-/* =========================
-   TASKS - CREATE
-========================= */
-
+// CREATE TASK
 app.post(
   "/api/tasks",
   requireAuth,
@@ -520,25 +568,25 @@ app.post(
       const result = await pool.query(
         `
         INSERT INTO tasks
-          (
-            title,
-            subject,
-            due_date,
-            priority,
-            type,
-            completed,
-            user_id
-          )
+        (
+          title,
+          subject,
+          due_date,
+          priority,
+          type,
+          completed,
+          user_id
+        )
         VALUES
-          (
-            $1,
-            $2,
-            $3,
-            $4,
-            $5,
-            FALSE,
-            $6
-          )
+        (
+          $1,
+          $2,
+          $3,
+          $4,
+          $5,
+          FALSE,
+          $6
+        )
         RETURNING
           id,
           title,
@@ -574,10 +622,7 @@ app.post(
   }
 );
 
-/* =========================
-   TASKS - UPDATE
-========================= */
-
+// UPDATE TASK
 app.put(
   "/api/tasks/:id",
   requireAuth,
@@ -654,10 +699,7 @@ app.put(
   }
 );
 
-/* =========================
-   TASKS - COMPLETE
-========================= */
-
+// MARK TASK COMPLETE / INCOMPLETE
 app.patch(
   "/api/tasks/:id/completed",
   requireAuth,
@@ -716,10 +758,7 @@ app.patch(
   }
 );
 
-/* =========================
-   TASKS - DELETE
-========================= */
-
+// DELETE TASK
 app.delete(
   "/api/tasks/:id",
   requireAuth,

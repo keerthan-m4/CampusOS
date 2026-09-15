@@ -35,6 +35,22 @@ function saveAuthSession(auth) {
   localStorage.setItem("campusosAuth", JSON.stringify(auth));
 }
 
+async function campusApiFetch(path, token, options = {}) {
+  const headers = {
+    ...(options.headers || {}),
+    Authorization: `Bearer ${token}`,
+  };
+
+  if (options.body && !headers["Content-Type"]) {
+    headers["Content-Type"] = "application/json";
+  }
+
+  return fetch(`${API_BASE_URL}${path}`, {
+    ...options,
+    headers,
+  });
+}
+
 function formatDate(dateString) {
   if (!dateString) {
     return {
@@ -1909,14 +1925,8 @@ function Dashboard({
 }
 
 
-function ResourcesHub() {
-  const [resources, setResources] = useState(() => {
-    try {
-      return JSON.parse(localStorage.getItem("campusosResources")) || [];
-    } catch {
-      return [];
-    }
-  });
+function ResourcesHub({ token }) {
+  const [resources, setResources] = useState([]);
   const [subject, setSubject] = useState("");
   const [title, setTitle] = useState("");
   const [resourceType, setResourceType] = useState("Website");
@@ -1924,11 +1934,25 @@ function ResourcesHub() {
   const [file, setFile] = useState(null);
   const [search, setSearch] = useState("");
   const [fileError, setFileError] = useState("");
+  const [loading, setLoading] = useState(true);
+  const [saving, setSaving] = useState(false);
 
-  const saveResources = (items) => {
-    setResources(items);
-    localStorage.setItem("campusosResources", JSON.stringify(items));
+  const loadResources = async () => {
+    try {
+      const response = await campusApiFetch("/api/resources", token);
+      if (!response.ok) throw new Error("Failed to load resources.");
+      setResources(await response.json());
+    } catch (error) {
+      console.error(error);
+      alert("Could not load study resources.");
+    } finally {
+      setLoading(false);
+    }
   };
+
+  useEffect(() => {
+    loadResources();
+  }, [token]);
 
   const handleResourceTypeChange = (event) => {
     setResourceType(event.target.value);
@@ -1960,61 +1984,101 @@ function ResourcesHub() {
     if (selectedFile.size > 3 * 1024 * 1024) {
       setFile(null);
       event.target.value = "";
-      setFileError("File must be 5 MB or smaller.");
+      setFileError("File must be 3 MB or smaller.");
       return;
     }
 
     setFile(selectedFile);
   };
 
-  const addResource = (event) => {
+  const addResource = async (event) => {
     event.preventDefault();
+
     if (!subject.trim() || !title.trim()) return;
 
     if (resourceType === "Website" && !url.trim()) return;
+
     if (resourceType === "File" && !file) {
       setFileError("Choose a PDF or image file first.");
       return;
     }
 
-    if (resourceType === "Website") {
-      const item = {
-        id: Date.now(),
-        subject: subject.trim(),
-        title: title.trim(),
-        type: "Website",
-        url: url.trim(),
-      };
-      saveResources([item, ...resources]);
+    setSaving(true);
+
+    try {
+      let payload;
+
+      if (resourceType === "Website") {
+        payload = {
+          subject: subject.trim(),
+          title: title.trim(),
+          type: "Website",
+          url: url.trim(),
+        };
+      } else {
+        const fileData = await new Promise((resolve, reject) => {
+          const reader = new FileReader();
+          reader.onload = () => resolve(reader.result);
+          reader.onerror = () => reject(new Error("Could not read file."));
+          reader.readAsDataURL(file);
+        });
+
+        payload = {
+          subject: subject.trim(),
+          title: title.trim(),
+          type: file.type === "application/pdf" ? "PDF" : "Image",
+          fileName: file.name,
+          fileData,
+          mimeType: file.type,
+        };
+      }
+
+      const response = await campusApiFetch("/api/resources", token, {
+        method: "POST",
+        body: JSON.stringify(payload),
+      });
+
+      if (!response.ok) {
+        const data = await response.json().catch(() => ({}));
+        throw new Error(data.error || "Failed to add resource.");
+      }
+
+      const created = await response.json();
+      setResources((current) => [created, ...current]);
+
       setSubject("");
       setTitle("");
       setUrl("");
-      return;
-    }
-
-    const reader = new FileReader();
-    reader.onload = () => {
-      const item = {
-        id: Date.now(),
-        subject: subject.trim(),
-        title: title.trim(),
-        type: file.type === "application/pdf" ? "PDF" : "Image",
-        fileName: file.name,
-        fileData: reader.result,
-      };
-
-      saveResources([item, ...resources]);
-      setSubject("");
-      setTitle("");
       setFile(null);
       setFileError("");
+
       const input = document.getElementById("resource-file-input");
       if (input) input.value = "";
-    };
-    reader.onerror = () => {
-      setFileError("Could not read that file. Please try again.");
-    };
-    reader.readAsDataURL(file);
+    } catch (error) {
+      console.error(error);
+      setFileError(error.message || "Could not add resource.");
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const deleteResource = async (id) => {
+    if (!window.confirm("Delete this resource?")) return;
+
+    try {
+      const response = await campusApiFetch(`/api/resources/${id}`, token, {
+        method: "DELETE",
+      });
+
+      if (!response.ok) throw new Error("Failed to delete resource.");
+
+      setResources((current) =>
+        current.filter((resource) => resource.id !== id)
+      );
+    } catch (error) {
+      console.error(error);
+      alert("Could not delete resource.");
+    }
   };
 
   const filtered = resources.filter((item) =>
@@ -2087,14 +2151,22 @@ function ResourcesHub() {
                   onChange={handleFileChange}
                   required
                 />
-                <small className="resource-file-hint">Maximum 3 MB · PDF, JPG, PNG, WEBP and other images</small>
-                {file && <small className="resource-selected-file">Selected: {file.name}</small>}
-                {fileError && <small className="resource-file-error">{fileError}</small>}
+                <small className="resource-file-hint">
+                  Maximum 3 MB · PDF or image
+                </small>
+                {file && (
+                  <small className="resource-selected-file">
+                    Selected: {file.name}
+                  </small>
+                )}
+                {fileError && (
+                  <small className="resource-file-error">{fileError}</small>
+                )}
               </div>
             )}
 
-            <button className="submit-button" type="submit">
-              Add Resource
+            <button className="submit-button" type="submit" disabled={saving}>
+              {saving ? "Saving..." : "Add Resource"}
             </button>
           </form>
         </div>
@@ -2103,7 +2175,9 @@ function ResourcesHub() {
           <div className="panel-header">
             <div>
               <h2>My Resources</h2>
-              <p className="panel-subtitle">{resources.length} saved resource{resources.length !== 1 ? "s" : ""}</p>
+              <p className="panel-subtitle">
+                {resources.length} saved resource{resources.length !== 1 ? "s" : ""}
+              </p>
             </div>
             <input
               className="resource-search"
@@ -2113,7 +2187,11 @@ function ResourcesHub() {
             />
           </div>
 
-          {filtered.length === 0 ? (
+          {loading ? (
+            <div className="empty-feature-state">
+              <p>Loading resources...</p>
+            </div>
+          ) : filtered.length === 0 ? (
             <div className="empty-feature-state">
               <span>🔎</span>
               <p>No resources found.</p>
@@ -2123,27 +2201,35 @@ function ResourcesHub() {
               {filtered.map((item) => (
                 <div className="resource-card" key={item.id}>
                   <div className="resource-type">{item.type}</div>
+
                   <div className="resource-card-body">
                     <span className="resource-subject">{item.subject}</span>
                     <h3>{item.title}</h3>
+
                     {item.type === "Website" ? (
                       <a href={item.url} target="_blank" rel="noreferrer">
                         Open website ↗
                       </a>
                     ) : (
-                      <a href={item.fileData} target="_blank" rel="noreferrer">
+                      <a
+                        href={item.fileData}
+                        target="_blank"
+                        rel="noreferrer"
+                      >
                         Open {item.type.toLowerCase()} ↗
                       </a>
                     )}
-                    {item.fileName && <small className="resource-file-name">{item.fileName}</small>}
+
+                    {item.fileName && (
+                      <small className="resource-file-name">
+                        {item.fileName}
+                      </small>
+                    )}
                   </div>
+
                   <button
                     className="icon-delete-button"
-                    onClick={() =>
-                      saveResources(
-                        resources.filter((resource) => resource.id !== item.id)
-                      )
-                    }
+                    onClick={() => deleteResource(item.id)}
                   >
                     ×
                   </button>
@@ -2156,6 +2242,7 @@ function ResourcesHub() {
     </div>
   );
 }
+
 
 function QuickNotes() {
   const [notes, setNotes] = useState(() => {
@@ -2246,14 +2333,10 @@ function QuickNotes() {
 }
 
 
-function AttendanceTracker() {
-  const [subjects, setSubjects] = useState(() => {
-    try {
-      return JSON.parse(localStorage.getItem("campusosAttendance")) || [];
-    } catch {
-      return [];
-    }
-  });
+function AttendanceTracker({ token }) {
+  const [subjects, setSubjects] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [editingId, setEditingId] = useState(null);
 
   const [form, setForm] = useState({
     subject: "",
@@ -2264,11 +2347,22 @@ function AttendanceTracker() {
     total: "",
   });
 
-  const [editingId, setEditingId] = useState(null);
+  const loadAttendance = async () => {
+    try {
+      const response = await campusApiFetch("/api/attendance", token);
+      if (!response.ok) throw new Error("Failed to load attendance.");
+      setSubjects(await response.json());
+    } catch (error) {
+      console.error(error);
+      alert("Could not load attendance data.");
+    } finally {
+      setLoading(false);
+    }
+  };
 
   useEffect(() => {
-    localStorage.setItem("campusosAttendance", JSON.stringify(subjects));
-  }, [subjects]);
+    loadAttendance();
+  }, [token]);
 
   const countWorkingDays = (startDate, endDate) => {
     if (!startDate || !endDate) return 0;
@@ -2295,6 +2389,7 @@ function AttendanceTracker() {
   };
 
   const resetForm = () => {
+    setEditingId(null);
     setForm({
       subject: "",
       lastWorkingDay: "",
@@ -2303,66 +2398,31 @@ function AttendanceTracker() {
       attended: "",
       total: "",
     });
-    setEditingId(null);
   };
 
-  const validateForm = () => {
+  const saveAttendance = async (event) => {
+    event.preventDefault();
+
     const attended = Number(form.attended);
     const total = Number(form.total);
     const classesPerWeek = Number(form.classesPerWeek);
     const target = Number(form.target);
 
-    if (!form.subject.trim()) {
-      alert("Please enter the subject name.");
-      return null;
+    if (
+      !form.subject.trim() ||
+      !form.lastWorkingDay ||
+      classesPerWeek <= 0 ||
+      total < 0 ||
+      attended < 0 ||
+      attended > total ||
+      target < 1 ||
+      target > 100
+    ) {
+      alert("Please enter valid attendance details.");
+      return;
     }
 
-    if (!form.lastWorkingDay) {
-      alert("Please enter the last working day.");
-      return null;
-    }
-
-    const today = new Date();
-    const todayKey =
-      today.getFullYear() +
-      "-" +
-      String(today.getMonth() + 1).padStart(2, "0") +
-      "-" +
-      String(today.getDate()).padStart(2, "0");
-
-    if (form.lastWorkingDay < todayKey) {
-      alert("Last working day cannot be before today.");
-      return null;
-    }
-
-    if (!Number.isFinite(classesPerWeek) || classesPerWeek <= 0) {
-      alert("Classes per week must be greater than 0.");
-      return null;
-    }
-
-    if (!Number.isFinite(total) || total < 0) {
-      alert("Classes done must be 0 or more.");
-      return null;
-    }
-
-    if (!Number.isFinite(attended) || attended < 0) {
-      alert("Classes attended must be 0 or more.");
-      return null;
-    }
-
-    if (attended > total) {
-      alert(
-        `Classes attended cannot be greater than classes done. You entered ${attended} attended out of ${total} classes.`
-      );
-      return null;
-    }
-
-    if (!Number.isFinite(target) || target < 1 || target > 100) {
-      alert("Minimum required percentage must be between 1 and 100.");
-      return null;
-    }
-
-    return {
+    const payload = {
       subject: form.subject.trim(),
       lastWorkingDay: form.lastWorkingDay,
       classesPerWeek,
@@ -2370,61 +2430,84 @@ function AttendanceTracker() {
       attended,
       total,
     };
-  };
 
-  const handleSubmit = (e) => {
-    e.preventDefault();
-
-    const validated = validateForm();
-    if (!validated) return;
-
-    if (editingId !== null) {
-      setSubjects(
-        subjects.map((item) =>
-          item.id === editingId
-            ? {
-                ...item,
-                ...validated,
-              }
-            : item
-        )
-      );
-    } else {
-      setSubjects([
+    try {
+      const response = await campusApiFetch(
+        editingId !== null
+          ? `/api/attendance/${editingId}`
+          : "/api/attendance",
+        token,
         {
-          id: Date.now(),
-          ...validated,
-        },
-        ...subjects,
-      ]);
-    }
+          method: editingId !== null ? "PUT" : "POST",
+          body: JSON.stringify(payload),
+        }
+      );
 
-    resetForm();
+      if (!response.ok) {
+        const data = await response.json().catch(() => ({}));
+        throw new Error(data.error || "Could not save attendance.");
+      }
+
+      const saved = await response.json();
+
+      setSubjects((current) =>
+        editingId !== null
+          ? current.map((item) =>
+              item.id === editingId ? saved : item
+            )
+          : [saved, ...current]
+      );
+
+      resetForm();
+    } catch (error) {
+      console.error(error);
+      alert(error.message || "Could not save attendance.");
+    }
   };
 
-  const editSubject = (subject) => {
+  const editAttendance = (subject) => {
     setEditingId(subject.id);
+
     setForm({
-      subject: subject.subject,
-      lastWorkingDay: subject.lastWorkingDay,
-      classesPerWeek: String(subject.classesPerWeek),
-      target: String(subject.target),
-      attended: String(subject.attended),
-      total: String(subject.total),
+      subject: subject.subject || "",
+      lastWorkingDay: subject.lastWorkingDay || "",
+      classesPerWeek: String(subject.classesPerWeek ?? ""),
+      target: String(subject.target ?? 75),
+      attended: String(subject.attended ?? ""),
+      total: String(subject.total ?? ""),
     });
+
     window.scrollTo({ top: 0, behavior: "smooth" });
   };
 
-  const remove = (id) => {
-    setSubjects(subjects.filter((s) => s.id !== id));
+  const remove = async (id) => {
+    if (!window.confirm("Delete this subject's attendance data?")) return;
 
-    if (editingId === id) {
-      resetForm();
+    try {
+      const response = await campusApiFetch(
+        `/api/attendance/${id}`,
+        token,
+        { method: "DELETE" }
+      );
+
+      if (!response.ok) throw new Error("Could not delete attendance.");
+
+      setSubjects((current) =>
+        current.filter((item) => item.id !== id)
+      );
+
+      if (editingId === id) {
+        resetForm();
+      }
+    } catch (error) {
+      console.error(error);
+      alert("Could not delete attendance.");
     }
   };
 
   const stats = (s) => {
     const pct = s.total ? (s.attended / s.total) * 100 : 0;
+
     const today = new Date();
     const todayKey =
       today.getFullYear() +
@@ -2433,63 +2516,67 @@ function AttendanceTracker() {
       "-" +
       String(today.getDate()).padStart(2, "0");
 
+    const startDate =
+      todayKey <= s.lastWorkingDay
+        ? todayKey
+        : s.lastWorkingDay;
+
     const workingDaysLeft = countWorkingDays(
-      todayKey,
+      startDate,
       s.lastWorkingDay
     );
 
-    const scheduledClassesRemaining = Math.max(
+    const scheduledClasses = Math.max(
       0,
-      (workingDaysLeft / 5) * s.classesPerWeek
+      Math.round((workingDaysLeft / 5) * s.classesPerWeek)
     );
 
-    // Assume an average 10% of scheduled classes are lost to holidays,
-    // cancellations, or other no-attendance days.
-    // Show expected classes as a whole number after applying the 10%
-    // holiday/cancellation assumption.
-    const remainingClasses = Math.max(
+    // Assume 10% of scheduled classes are lost to holidays/cancellations.
+    const expectedClassesLeft = Math.max(
       0,
-      Math.round(scheduledClassesRemaining * 0.9)
+      Math.round(scheduledClasses * 0.9)
     );
 
-    const finalTotal = s.total + remainingClasses;
+    const finalTotal = s.total + expectedClassesLeft;
 
     const classesNeeded = Math.max(
       0,
       Math.ceil((s.target / 100) * finalTotal - s.attended)
     );
 
-    const possibleToReachTarget = classesNeeded <= remainingClasses;
-
-    const classesToAttend = Math.min(
-      remainingClasses,
-      classesNeeded
-    );
+    const possibleToReachTarget =
+      classesNeeded <= expectedClassesLeft;
 
     const maximumPossiblePercentage =
       finalTotal > 0
-        ? ((s.attended + remainingClasses) / finalTotal) * 100
+        ? ((s.attended + expectedClassesLeft) / finalTotal) * 100
         : 0;
 
+    const classesToAttend = Math.min(
+      expectedClassesLeft,
+      classesNeeded
+    );
+
+    const safe = pct >= s.target;
+
     const canMiss =
-      pct >= s.target
+      safe
         ? Math.max(
             0,
             Math.floor(
-              s.attended +
-                remainingClasses -
-                (s.target / 100) * finalTotal
+              (s.attended - (s.target / 100) * s.total) /
+                (s.target / 100)
             )
           )
         : 0;
-
-    const safe = pct >= s.target;
 
     return {
       pct,
       safe,
       workingDaysLeft,
-      remainingClasses,
+      scheduledClasses,
+      expectedClassesLeft,
+      classesNeeded,
       classesToAttend,
       canMiss,
       possibleToReachTarget,
@@ -2503,13 +2590,13 @@ function AttendanceTracker() {
         <div>
           <h1>Attendance Tracker</h1>
           <p>
-            Track your current attendance and update it anytime as your
-            classes continue.
+            Plan your attendance using working days, weekly classes and a
+            realistic 10% cancellation/holiday allowance.
           </p>
         </div>
       </div>
 
-      <form className="feature-form attendance-form" onSubmit={handleSubmit}>
+      <form className="feature-form attendance-form" onSubmit={saveAttendance}>
         <input
           placeholder="Subject name"
           value={form.subject}
@@ -2570,7 +2657,7 @@ function AttendanceTracker() {
           <input
             type="number"
             min="0"
-            placeholder="e.g. 32"
+            placeholder="e.g. 40"
             value={form.total}
             onChange={(e) =>
               setForm({
@@ -2586,7 +2673,7 @@ function AttendanceTracker() {
           <input
             type="number"
             min="0"
-            placeholder="e.g. 27"
+            placeholder="e.g. 32"
             value={form.attended}
             onChange={(e) =>
               setForm({
@@ -2597,31 +2684,31 @@ function AttendanceTracker() {
           />
         </div>
 
-        <div className="attendance-form-actions">
-          <button className="primary-action" type="submit">
-            {editingId !== null ? "Save Attendance" : "Add Subject"}
-          </button>
+        <button className="primary-action" type="submit">
+          {editingId !== null ? "Save Attendance" : "Add Subject"}
+        </button>
 
-          {editingId !== null && (
-            <button
-              className="secondary-action"
-              type="button"
-              onClick={resetForm}
-            >
-              Cancel
-            </button>
-          )}
-        </div>
+        {editingId !== null && (
+          <button
+            className="secondary-action"
+            type="button"
+            onClick={resetForm}
+          >
+            Cancel Edit
+          </button>
+        )}
       </form>
 
       <div className="feature-grid">
-        {subjects.length === 0 ? (
+        {loading ? (
+          <div className="empty-feature">
+            <p>Loading attendance...</p>
+          </div>
+        ) : subjects.length === 0 ? (
           <div className="empty-feature">
             <span>🎓</span>
             <h3>No subjects added</h3>
-            <p>
-              Add your first subject to start tracking attendance.
-            </p>
+            <p>Add your first subject to start tracking attendance.</p>
           </div>
         ) : (
           subjects.map((s) => {
@@ -2637,23 +2724,12 @@ function AttendanceTracker() {
                     </p>
                   </div>
 
-                  <div className="attendance-card-actions">
-                    <button
-                      className="secondary-action attendance-edit-button"
-                      type="button"
-                      onClick={() => editSubject(s)}
-                    >
-                      Edit Attendance
-                    </button>
-                    <button
-                      className="icon-button danger"
-                      type="button"
-                      onClick={() => remove(s.id)}
-                      aria-label={`Delete ${s.subject}`}
-                    >
-                      ×
-                    </button>
-                  </div>
+                  <button
+                    className="icon-button danger"
+                    onClick={() => remove(s.id)}
+                  >
+                    ×
+                  </button>
                 </div>
 
                 <div className="attendance-percent">
@@ -2676,7 +2752,7 @@ function AttendanceTracker() {
                   </div>
 
                   <div>
-                    <strong>{x.remainingClasses}</strong>
+                    <strong>{x.expectedClassesLeft}</strong>
                     <span>Expected classes left</span>
                   </div>
 
@@ -2696,34 +2772,49 @@ function AttendanceTracker() {
                   }`}
                 >
                   {x.safe
-                    ? `🟢 Safe · You can miss ${
-                        x.canMiss
-                      } of the expected ${x.remainingClasses} classes and still stay at ${s.target}% or above`
+                    ? `🟢 Safe · You can miss approximately ${x.canMiss} more class${
+                        x.canMiss === 1 ? "" : "es"
+                      } and stay around ${s.target}%`
                     : x.possibleToReachTarget
                     ? `🔴 Shortage · You need to attend ${
                         x.classesToAttend
-                      } of the expected ${
-                        x.remainingClasses
-                      } classes to reach ${s.target}%`
-                    : `⚠️ Target not reachable · Even if you attend all ${
-                        x.remainingClasses
-                      } expected classes, your maximum attendance will be ${x.maximumPossiblePercentage.toFixed(1)}%`}
+                      } of the expected ${x.expectedClassesLeft} remaining classes`
+                    : `⚠️ Target not reachable · Even with attendance in all ${
+                        x.expectedClassesLeft
+                      } expected classes, the projected maximum is ${x.maximumPossiblePercentage.toFixed(
+                        1
+                      )}%`}
                 </div>
 
                 <div className="attendance-extra">
                   <span>
-                    Last working day: <strong>{s.lastWorkingDay}</strong>
+                    Last working day:{" "}
+                    <strong>{s.lastWorkingDay}</strong>
                   </span>
+
                   <span>
-                    Classes/week: <strong>{s.classesPerWeek}</strong>
+                    Classes/week:{" "}
+                    <strong>{s.classesPerWeek}</strong>
                   </span>
+
                   <span>
-                    Avg. cancellations: <strong>10%</strong>
+                    Scheduled estimate:{" "}
+                    <strong>{x.scheduledClasses}</strong>
                   </span>
+
                   <span>
-                    You can miss: <strong>{x.canMiss}</strong>
+                    10% allowance applied:{" "}
+                    <strong>{x.expectedClassesLeft}</strong>
                   </span>
                 </div>
+
+                <button
+                  className="secondary-action attendance-edit-button"
+                  type="button"
+                  onClick={() => editAttendance(s)}
+                >
+                  Edit Attendance
+                </button>
               </div>
             );
           })
@@ -2734,42 +2825,555 @@ function AttendanceTracker() {
 }
 
 
-function CGPACalculator() {
-  const [semesters, setSemesters] = useState(() => {
-    try { return JSON.parse(localStorage.getItem("campusosCGPA")) || []; } catch { return []; }
-  });
-  const [form, setForm] = useState({ name: "", credits: "", grade: "" });
+function CGPACalculator({ token }) {
+  const [semesters, setSemesters] = useState([]);
   const [semesterName, setSemesterName] = useState("Semester 1");
   const [current, setCurrent] = useState([]);
-  const gradePoints = { "O": 10, "A+": 9, "A": 8, "B+": 7, "B": 6, "C": 5, "D": 4, "F": 0 };
-  useEffect(() => localStorage.setItem("campusosCGPA", JSON.stringify(semesters)), [semesters]);
-  const add = e => { e.preventDefault(); if (!form.name.trim() || Number(form.credits) <= 0 || !(form.grade in gradePoints)) return alert("Enter a subject, valid credits and grade."); setCurrent([...current, { id: Date.now(), ...form, credits: Number(form.credits) }]); setForm({ name: "", credits: "", grade: "" }); };
-  const currentGPA = () => { const c = current.reduce((a, x) => a + x.credits, 0); return c ? current.reduce((a, x) => a + x.credits * gradePoints[x.grade], 0) / c : 0; };
-  const saveSemester = () => { if (!current.length) return; setSemesters([{ id: Date.now(), name: semesterName || `Semester ${semesters.length + 1}`, gpa: Number(currentGPA().toFixed(2)) }, ...semesters]); setCurrent([]); setSemesterName(`Semester ${semesters.length + 2}`); };
-  const cgpa = semesters.length ? semesters.reduce((a, s) => a + s.gpa, 0) / semesters.length : 0;
-  return <div className="page-container">
-    <div className="page-header"><div><h1>CGPA Calculator</h1><p>Calculate semester GPA and keep a history of your academic progress.</p></div></div>
-    <div className="calculator-layout"><div className="feature-card">
-      <h2>Current Semester</h2><div className="gpa-big">{currentGPA().toFixed(2)}</div>
-      <form className="feature-form stacked" onSubmit={add}><input placeholder="Subject" value={form.name} onChange={e => setForm({ ...form, name: e.target.value })}/><input type="number" min="1" placeholder="Credits" value={form.credits} onChange={e => setForm({ ...form, credits: e.target.value })}/><select value={form.grade} onChange={e => setForm({ ...form, grade: e.target.value })}><option value="">Select grade</option>{Object.keys(gradePoints).map(g => <option key={g} value={g}>{g} — {gradePoints[g]} points</option>)}</select><button className="primary-action">Add Subject</button></form>
-      {current.map(x => <div className="table-row" key={x.id}><span>{x.name}</span><span>{x.credits} cr</span><strong>{x.grade}</strong></div>)}
-      <div className="semester-save"><input value={semesterName} onChange={e => setSemesterName(e.target.value)} /><button className="secondary-action" onClick={saveSemester}>Save Semester</button></div>
-    </div><div className="feature-card cgpa-summary"><h2>Overall CGPA</h2><div className="cgpa-circle">{cgpa.toFixed(2)}</div><p>{semesters.length} semester{semesters.length === 1 ? "" : "s"} saved</p>{semesters.map(s => <div className="table-row" key={s.id}><span>{s.name}</span><strong>{s.gpa.toFixed(2)}</strong></div>)}</div></div>
-  </div>;
+  const [loading, setLoading] = useState(true);
+
+  const [form, setForm] = useState({
+    name: "",
+    credits: "",
+    grade: "",
+  });
+
+  const gradePoints = {
+    O: 10,
+    "A+": 9,
+    A: 8,
+    "B+": 7,
+    B: 6,
+    C: 5,
+    D: 4,
+    F: 0,
+  };
+
+  const loadCgpa = async () => {
+    try {
+      const response = await campusApiFetch("/api/cgpa", token);
+      if (!response.ok) throw new Error("Failed to load CGPA data.");
+
+      const data = await response.json();
+
+      setSemesters(Array.isArray(data.semesters) ? data.semesters : []);
+      setCurrent(
+        Array.isArray(data.currentSubjects)
+          ? data.currentSubjects
+          : []
+      );
+      setSemesterName(data.semesterName || "Semester 1");
+    } catch (error) {
+      console.error(error);
+      alert("Could not load CGPA data.");
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  useEffect(() => {
+    loadCgpa();
+  }, [token]);
+
+  const currentGPA = () => {
+    const credits = current.reduce(
+      (sum, item) => sum + Number(item.credits || 0),
+      0
+    );
+
+    if (!credits) return 0;
+
+    return (
+      current.reduce(
+        (sum, item) =>
+          sum +
+          Number(item.credits || 0) *
+            Number(gradePoints[item.grade] ?? 0),
+        0
+      ) / credits
+    );
+  };
+
+  const saveData = async (nextSemesters, nextCurrent, nextName) => {
+    const response = await campusApiFetch("/api/cgpa", token, {
+      method: "PUT",
+      body: JSON.stringify({
+        semesters: nextSemesters,
+        currentSubjects: nextCurrent,
+        semesterName: nextName,
+      }),
+    });
+
+    if (!response.ok) {
+      const data = await response.json().catch(() => ({}));
+      throw new Error(data.error || "Could not save CGPA data.");
+    }
+  };
+
+  const add = async (event) => {
+    event.preventDefault();
+
+    if (
+      !form.name.trim() ||
+      Number(form.credits) <= 0 ||
+      !(form.grade in gradePoints)
+    ) {
+      alert("Enter a subject, valid credits and grade.");
+      return;
+    }
+
+    const nextCurrent = [
+      ...current,
+      {
+        id: Date.now(),
+        name: form.name.trim(),
+        credits: Number(form.credits),
+        grade: form.grade,
+      },
+    ];
+
+    try {
+      await saveData(semesters, nextCurrent, semesterName);
+      setCurrent(nextCurrent);
+      setForm({
+        name: "",
+        credits: "",
+        grade: "",
+      });
+    } catch (error) {
+      console.error(error);
+      alert(error.message || "Could not save subject.");
+    }
+  };
+
+  const saveSemester = async () => {
+    if (!current.length) {
+      alert("Add at least one subject first.");
+      return;
+    }
+
+    const gpa = Number(currentGPA().toFixed(2));
+
+    const nextSemesters = [
+      {
+        id: Date.now(),
+        name:
+          semesterName.trim() ||
+          `Semester ${semesters.length + 1}`,
+        gpa,
+      },
+      ...semesters,
+    ];
+
+    const nextName = `Semester ${nextSemesters.length + 1}`;
+
+    try {
+      await saveData(nextSemesters, [], nextName);
+      setSemesters(nextSemesters);
+      setCurrent([]);
+      setSemesterName(nextName);
+    } catch (error) {
+      console.error(error);
+      alert(error.message || "Could not save semester.");
+    }
+  };
+
+  const deleteSemester = async (id) => {
+    const nextSemesters = semesters.filter(
+      (semester) => semester.id !== id
+    );
+
+    try {
+      await saveData(nextSemesters, current, semesterName);
+      setSemesters(nextSemesters);
+    } catch (error) {
+      console.error(error);
+      alert(error.message || "Could not delete semester.");
+    }
+  };
+
+  const cgpa = semesters.length
+    ? semesters.reduce((sum, semester) => sum + Number(semester.gpa), 0) /
+      semesters.length
+    : 0;
+
+  return (
+    <div className="page-container">
+      <div className="page-header">
+        <div>
+          <h1>CGPA Calculator</h1>
+          <p>
+            Your semester history and current calculation are synced to your
+            CampusOS account.
+          </p>
+        </div>
+      </div>
+
+      {loading ? (
+        <div className="empty-feature">
+          <p>Loading CGPA...</p>
+        </div>
+      ) : (
+        <div className="calculator-layout">
+          <div className="feature-card">
+            <h2>Current Semester</h2>
+
+            <div className="gpa-big">
+              {currentGPA().toFixed(2)}
+            </div>
+
+            <form
+              className="feature-form stacked"
+              onSubmit={add}
+            >
+              <input
+                placeholder="Subject"
+                value={form.name}
+                onChange={(e) =>
+                  setForm({
+                    ...form,
+                    name: e.target.value,
+                  })
+                }
+              />
+
+              <input
+                type="number"
+                min="1"
+                placeholder="Credits"
+                value={form.credits}
+                onChange={(e) =>
+                  setForm({
+                    ...form,
+                    credits: e.target.value,
+                  })
+                }
+              />
+
+              <select
+                value={form.grade}
+                onChange={(e) =>
+                  setForm({
+                    ...form,
+                    grade: e.target.value,
+                  })
+                }
+              >
+                <option value="">Select grade</option>
+                {Object.keys(gradePoints).map((grade) => (
+                  <option key={grade} value={grade}>
+                    {grade} — {gradePoints[grade]} points
+                  </option>
+                ))}
+              </select>
+
+              <button
+                className="primary-action"
+                type="submit"
+              >
+                Add Subject
+              </button>
+            </form>
+
+            {current.map((item) => (
+              <div className="table-row" key={item.id}>
+                <span>{item.name}</span>
+                <span>{item.credits} cr</span>
+                <strong>{item.grade}</strong>
+              </div>
+            ))}
+
+            <div className="semester-save">
+              <input
+                value={semesterName}
+                onChange={(e) =>
+                  setSemesterName(e.target.value)
+                }
+              />
+
+              <button
+                className="secondary-action"
+                type="button"
+                onClick={saveSemester}
+              >
+                Save Semester
+              </button>
+            </div>
+          </div>
+
+          <div className="feature-card cgpa-summary">
+            <h2>Overall CGPA</h2>
+
+            <div className="cgpa-circle">
+              {cgpa.toFixed(2)}
+            </div>
+
+            <p>
+              {semesters.length} semester
+              {semesters.length === 1 ? "" : "s"} saved
+            </p>
+
+            {semesters.map((semester) => (
+              <div className="table-row" key={semester.id}>
+                <span>{semester.name}</span>
+
+                <strong>{Number(semester.gpa).toFixed(2)}</strong>
+
+                <button
+                  className="icon-button danger"
+                  type="button"
+                  onClick={() => deleteSemester(semester.id)}
+                >
+                  ×
+                </button>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+    </div>
+  );
 }
 
-function CollegeTimetable() {
-  const days = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"];
-  const [entries, setEntries] = useState(() => { try { return JSON.parse(localStorage.getItem("campusosTimetable")) || []; } catch { return []; } });
-  const [form, setForm] = useState({ day: "Monday", time: "09:00", subject: "", room: "", faculty: "" });
-  useEffect(() => localStorage.setItem("campusosTimetable", JSON.stringify(entries)), [entries]);
-  const add = e => { e.preventDefault(); if (!form.subject.trim()) return alert("Enter a subject."); setEntries([...entries, { id: Date.now(), ...form }]); setForm({ ...form, subject: "", room: "", faculty: "" }); };
-  const remove = id => setEntries(entries.filter(x => x.id !== id));
-  return <div className="page-container">
-    <div className="page-header"><div><h1>College Timetable</h1><p>Keep your weekly classes, rooms and faculty in one place.</p></div></div>
-    <form className="feature-form timetable-form" onSubmit={add}><select value={form.day} onChange={e => setForm({ ...form, day: e.target.value })}>{days.map(d => <option key={d}>{d}</option>)}</select><input type="time" value={form.time} onChange={e => setForm({ ...form, time: e.target.value })}/><input placeholder="Subject" value={form.subject} onChange={e => setForm({ ...form, subject: e.target.value })}/><input placeholder="Room" value={form.room} onChange={e => setForm({ ...form, room: e.target.value })}/><input placeholder="Faculty" value={form.faculty} onChange={e => setForm({ ...form, faculty: e.target.value })}/><button className="primary-action">Add Class</button></form>
-    <div className="timetable-grid">{days.map(day => <div className="day-column" key={day}><div className="day-header">{day}</div>{entries.filter(x => x.day === day).sort((a,b) => a.time.localeCompare(b.time)).map(x => <div className="class-card" key={x.id}><div className="class-time">{x.time}</div><strong>{x.subject}</strong><span>{x.room || "Room not set"}</span><small>{x.faculty || "Faculty not set"}</small><button className="class-delete" onClick={() => remove(x.id)}>Remove</button></div>)}{entries.filter(x => x.day === day).length === 0 && <div className="day-empty">No classes</div>}</div>)}</div>
-  </div>;
+
+function CollegeTimetable({ token }) {
+  const days = [
+    "Monday",
+    "Tuesday",
+    "Wednesday",
+    "Thursday",
+    "Friday",
+    "Saturday",
+  ];
+
+  const [entries, setEntries] = useState([]);
+  const [loading, setLoading] = useState(true);
+
+  const [form, setForm] = useState({
+    day: "Monday",
+    time: "09:00",
+    subject: "",
+    room: "",
+    faculty: "",
+  });
+
+  const loadTimetable = async () => {
+    try {
+      const response = await campusApiFetch("/api/timetable", token);
+      if (!response.ok) throw new Error("Failed to load timetable.");
+      setEntries(await response.json());
+    } catch (error) {
+      console.error(error);
+      alert("Could not load timetable.");
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  useEffect(() => {
+    loadTimetable();
+  }, [token]);
+
+  const add = async (event) => {
+    event.preventDefault();
+
+    if (!form.subject.trim()) {
+      alert("Enter a subject.");
+      return;
+    }
+
+    try {
+      const response = await campusApiFetch("/api/timetable", token, {
+        method: "POST",
+        body: JSON.stringify({
+          ...form,
+          subject: form.subject.trim(),
+          room: form.room.trim(),
+          faculty: form.faculty.trim(),
+        }),
+      });
+
+      if (!response.ok) {
+        const data = await response.json().catch(() => ({}));
+        throw new Error(data.error || "Could not add class.");
+      }
+
+      const created = await response.json();
+
+      setEntries((current) => [...current, created]);
+
+      setForm({
+        day: form.day,
+        time: form.time,
+        subject: "",
+        room: "",
+        faculty: "",
+      });
+    } catch (error) {
+      console.error(error);
+      alert(error.message || "Could not add class.");
+    }
+  };
+
+  const remove = async (id) => {
+    if (!window.confirm("Remove this class?")) return;
+
+    try {
+      const response = await campusApiFetch(
+        `/api/timetable/${id}`,
+        token,
+        { method: "DELETE" }
+      );
+
+      if (!response.ok) throw new Error("Could not remove class.");
+
+      setEntries((current) =>
+        current.filter((entry) => entry.id !== id)
+      );
+    } catch (error) {
+      console.error(error);
+      alert("Could not remove class.");
+    }
+  };
+
+  return (
+    <div className="page-container">
+      <div className="page-header">
+        <div>
+          <h1>College Timetable</h1>
+          <p>
+            Your weekly classes are synced to your CampusOS account.
+          </p>
+        </div>
+      </div>
+
+      <form
+        className="feature-form timetable-form"
+        onSubmit={add}
+      >
+        <select
+          value={form.day}
+          onChange={(e) =>
+            setForm({
+              ...form,
+              day: e.target.value,
+            })
+          }
+        >
+          {days.map((day) => (
+            <option key={day}>{day}</option>
+          ))}
+        </select>
+
+        <input
+          type="time"
+          value={form.time}
+          onChange={(e) =>
+            setForm({
+              ...form,
+              time: e.target.value,
+            })
+          }
+        />
+
+        <input
+          placeholder="Subject"
+          value={form.subject}
+          onChange={(e) =>
+            setForm({
+              ...form,
+              subject: e.target.value,
+            })
+          }
+        />
+
+        <input
+          placeholder="Room"
+          value={form.room}
+          onChange={(e) =>
+            setForm({
+              ...form,
+              room: e.target.value,
+            })
+          }
+        />
+
+        <input
+          placeholder="Faculty"
+          value={form.faculty}
+          onChange={(e) =>
+            setForm({
+              ...form,
+              faculty: e.target.value,
+            })
+          }
+        />
+
+        <button className="primary-action" type="submit">
+          Add Class
+        </button>
+      </form>
+
+      {loading ? (
+        <div className="empty-feature">
+          <p>Loading timetable...</p>
+        </div>
+      ) : (
+        <div className="timetable-grid">
+          {days.map((day) => {
+            const dayEntries = entries
+              .filter((entry) => entry.day === day)
+              .sort((a, b) =>
+                String(a.time).localeCompare(String(b.time))
+              );
+
+            return (
+              <div className="day-column" key={day}>
+                <div className="day-header">{day}</div>
+
+                {dayEntries.map((entry) => (
+                  <div
+                    className="class-card"
+                    key={entry.id}
+                  >
+                    <div className="class-time">
+                      {entry.time}
+                    </div>
+
+                    <strong>{entry.subject}</strong>
+
+                    <span>
+                      {entry.room || "Room not set"}
+                    </span>
+
+                    <small>
+                      {entry.faculty ||
+                        "Faculty not set"}
+                    </small>
+
+                    <button
+                      className="class-delete"
+                      type="button"
+                      onClick={() =>
+                        remove(entry.id)
+                      }
+                    >
+                      Remove
+                    </button>
+                  </div>
+                ))}
+
+                {dayEntries.length === 0 && (
+                  <div className="day-empty">
+                    No classes
+                  </div>
+                )}
+              </div>
+            );
+          })}
+        </div>
+      )}
+    </div>
+  );
 }
 
 
@@ -3021,6 +3625,76 @@ function AppContent({ user, token, onLogout }) {
   useEffect(() => {
     loadTasks();
   }, []);
+
+  useEffect(() => {
+    const migrateLegacyData = async () => {
+      try {
+        const flag = `campusosLegacyMigrated:${user.id}`;
+
+        if (localStorage.getItem(flag)) {
+          return;
+        }
+
+        const attendanceRaw =
+          localStorage.getItem("campusosAttendance");
+        const cgpaRaw =
+          localStorage.getItem("campusosCGPA");
+        const timetableRaw =
+          localStorage.getItem("campusosTimetable");
+        const resourcesRaw =
+          localStorage.getItem("campusosResources");
+
+        const hasLegacyData =
+          attendanceRaw ||
+          cgpaRaw ||
+          timetableRaw ||
+          resourcesRaw;
+
+        if (!hasLegacyData) {
+          localStorage.setItem(flag, "1");
+          return;
+        }
+
+        const response = await campusApiFetch(
+          "/api/data/migrate",
+          token,
+          {
+            method: "POST",
+            body: JSON.stringify({
+              attendance: attendanceRaw
+                ? JSON.parse(attendanceRaw)
+                : [],
+              cgpa: cgpaRaw
+                ? JSON.parse(cgpaRaw)
+                : {
+                    semesters: [],
+                    currentSubjects: [],
+                    semesterName: "Semester 1",
+                  },
+              timetable: timetableRaw
+                ? JSON.parse(timetableRaw)
+                : [],
+              resources: resourcesRaw
+                ? JSON.parse(resourcesRaw)
+                : [],
+            }),
+          }
+        );
+
+        if (response.ok) {
+          localStorage.removeItem("campusosAttendance");
+          localStorage.removeItem("campusosCGPA");
+          localStorage.removeItem("campusosTimetable");
+          localStorage.removeItem("campusosResources");
+          localStorage.setItem(flag, "1");
+        }
+      } catch (error) {
+        console.error("Legacy data migration failed:", error);
+      }
+    };
+
+    migrateLegacyData();
+  }, [token, user.id]);
 
   const handleChange = (event) => {
     setFormData({
@@ -3377,22 +4051,22 @@ function AppContent({ user, token, onLogout }) {
 
           <Route
             path="/attendance"
-            element={<AttendanceTracker />}
+            element={<AttendanceTracker token={token} />}
           />
 
           <Route
             path="/cgpa"
-            element={<CGPACalculator />}
+            element={<CGPACalculator token={token} />}
           />
 
           <Route
             path="/timetable"
-            element={<CollegeTimetable />}
+            element={<CollegeTimetable token={token} />}
           />
 
           <Route
             path="/resources"
-            element={<ResourcesHub />}
+            element={<ResourcesHub token={token} />}
           />
 
         </Routes>
